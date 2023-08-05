@@ -1,4 +1,5 @@
 import math
+import os
 import random
 import time
 from functools import partial
@@ -11,7 +12,16 @@ from transformers import AutoTokenizer
 from model import T5
 
 # I/O
+out_dir = "out"
+eval_interval = 10
 log_interval = 1
+eval_iters = 1
+eval_only = False  # if True, script exits right after the first eval
+always_save_checkpoint = True  # if True, always save a checkpoint after each eval
+# wandb logging
+wandb_log = True  # disabled by default
+wandb_project = "tinystories"
+wandb_run_name = "ul2"  # 'run' + str(time.time())
 # data
 gradient_accumulation_steps = 5 * 8
 batch_size = 16
@@ -30,6 +40,15 @@ decay_lr = True  # whether to decay the learning rate
 warmup_iters = 2000  # how many steps to warm up for
 lr_decay_iters = 600000  # should be ~= max_iters per Chinchilla
 min_lr = 6e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+# -----------------------------------------------------------------------------
+config_keys = [
+    k
+    for k, v in globals().items()
+    if not k.startswith("_") and isinstance(v, (int, float, bool, str))
+]
+# exec(open('configurator.py').read()) # overrides from command line or config file
+config = {k: globals()[k] for k in config_keys}  # will be useful for logging
+# -----------------------------------------------------------------------------
 
 tokenizer = AutoTokenizer.from_pretrained("ul2-tinystories-tokenizer")
 
@@ -174,7 +193,7 @@ def get_batch(split):
 iter_num = 0
 best_val_loss = 1e9
 
-model = T5(
+model_args = dict(
     n_encoder_layer=2,
     n_decoder_layer=2,
     n_head=8,
@@ -183,9 +202,26 @@ model = T5(
     encoder_context_size=encoder_block_size,
     decoder_context_size=decoder_block_size,
 )
+model = T5(**model_args)
 model.cuda()
 
 optimizer = model.configure_optimizers(learning_rate)
+
+
+# helps estimate an arbitrarily accurate loss over either split using many batches
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ["train", "val"]:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            EX, DX, Y, _, _ = get_batch(split)
+            logits, loss = model(EX, DX, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
 
 
 # learning rate decay scheduler (cosine with warmup)
@@ -203,6 +239,12 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 
+# logging
+if wandb_log:
+    import wandb
+
+    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+
 EX, DX, Y, _, _ = get_batch("train")
 t0 = time.time()
 local_iter_num = 0
@@ -211,8 +253,35 @@ while True:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
 
-    # # evaluate the loss on train/val sets and write checkpoints
-    # if iter_num % eval_interval == 0
+    # evaluate the loss on train/val sets and write checkpoints
+    if iter_num % eval_interval == 0:
+        losses = estimate_loss()
+        print(
+            f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+        )
+        if wandb_log:
+            wandb.log(
+                {
+                    "iter": iter_num,
+                    "train/loss": losses["train"],
+                    "val/loss": losses["val"],
+                    "lr": lr,
+                    # "mfu": running_mfu*100, # convert to percentage
+                }
+            )
+        if losses["val"] < best_val_loss or always_save_checkpoint:
+            best_val_loss = losses["val"]
+            if iter_num > 0:
+                checkpoint = {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "model_args": model_args,
+                    "iter_num": iter_num,
+                    "best_val_loss": best_val_loss,
+                    "config": config,
+                }
+                print(f"saving checkpoint to {out_dir}")
+                torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
 
     for micro_step in range(gradient_accumulation_steps):
         logits, loss = model(EX, DX, Y)
