@@ -45,7 +45,6 @@ $ python train.py
 
 ## todos
 - features
-  - adafactor
   - match other settings to paper
   - resume from checkpoint
   - decoding for inference

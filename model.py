@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from transformers.optimization import Adafactor
 
 
 class MultiheadAttention(nn.Module):
@@ -398,6 +399,5 @@ class T5(nn.Module):
 
         return logits, loss
 
-    def configure_optimizers(self, learning_rate):
-        # TODO(adam): change to Adafactor to match paper
-        return torch.optim.AdamW(self.parameters(), lr=learning_rate)
+    def configure_optimizers(self):
+        return Adafactor(self.parameters())

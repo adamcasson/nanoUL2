@@ -28,18 +28,9 @@ batch_size = 16
 # model
 encoder_block_size = 256
 decoder_block_size = 128
-# adamw optimizer
-learning_rate = 6e-4  # max learning rate
+# adafactor optimizer
 max_iters = 100  # total number of training iterations
-weight_decay = 1e-1
-beta1 = 0.9
-beta2 = 0.95
 grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
-# learning rate decay settings
-decay_lr = True  # whether to decay the learning rate
-warmup_iters = 2000  # how many steps to warm up for
-lr_decay_iters = 600000  # should be ~= max_iters per Chinchilla
-min_lr = 6e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # -----------------------------------------------------------------------------
 config_keys = [
     k
@@ -205,7 +196,7 @@ model_args = dict(
 model = T5(**model_args)
 model.cuda()
 
-optimizer = model.configure_optimizers(learning_rate)
+optimizer = model.configure_optimizers()
 
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
@@ -224,21 +215,6 @@ def estimate_loss():
     return out
 
 
-# learning rate decay scheduler (cosine with warmup)
-def get_lr(it):
-    # 1) linear warmup for warmup_iters steps
-    if it < warmup_iters:
-        return learning_rate * it / warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it > lr_decay_iters:
-        return min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
-
-
 # logging
 if wandb_log:
     import wandb
@@ -250,9 +226,6 @@ t0 = time.time()
 local_iter_num = 0
 
 while True:
-    # determine and set the learning rate for this iteration
-    lr = get_lr(iter_num) if decay_lr else learning_rate
-
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0:
         losses = estimate_loss()
@@ -265,7 +238,7 @@ while True:
                     "iter": iter_num,
                     "train/loss": losses["train"],
                     "val/loss": losses["val"],
-                    "lr": lr,
+                    # "lr": lr,
                     # "mfu": running_mfu*100, # convert to percentage
                 }
             )
