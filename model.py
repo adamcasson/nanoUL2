@@ -35,8 +35,10 @@ class MultiheadAttention(nn.Module):
         if not bidirectional:
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer(
-                'bias',
-                torch.tril(torch.ones(context_size, context_size)).view(1, 1, context_size, context_size),
+                "bias",
+                torch.tril(torch.ones(context_size, context_size)).view(
+                    1, 1, context_size, context_size
+                ),
             )
         self.bidirectional = bidirectional
         self.n_head = n_head
@@ -44,10 +46,14 @@ class MultiheadAttention(nn.Module):
         self.relative_attn_n_buckets = relative_attn_n_buckets
         self.relative_attn_max_distance = relative_attn_max_distance
 
-        self.relative_attn_bias = nn.Embedding(self.relative_attn_n_buckets, self.n_head)
+        self.relative_attn_bias = nn.Embedding(
+            self.relative_attn_n_buckets, self.n_head
+        )
 
     @staticmethod
-    def _relative_position_bucket(relative_position, bidirectional=True, n_buckets=32, max_distance=128):
+    def _relative_position_bucket(
+        relative_position, bidirectional=True, n_buckets=32, max_distance=128
+    ):
         """
         code ref: https://github.com/huggingface/transformers/blob/v4.21.2/src/transformers/models/t5/modeling_t5.py#L374
         """
@@ -57,7 +63,9 @@ class MultiheadAttention(nn.Module):
             relative_buckets += (relative_position > 0).to(torch.long) * n_buckets
             relative_position = torch.abs(relative_position)
         else:
-            relative_position = -torch.min(relative_position, torch.zeros_like(relative_position))
+            relative_position = -torch.min(
+                relative_position, torch.zeros_like(relative_position)
+            )
         # now relative_position is in the range [0, inf)
 
         # half of the buckets are for exact increments in positions
@@ -81,7 +89,9 @@ class MultiheadAttention(nn.Module):
             torch.full_like(relative_position_if_large, n_buckets),
         )
 
-        relative_buckets += torch.where(is_small, relative_position, relative_position_if_large)
+        relative_buckets += torch.where(
+            is_small, relative_position, relative_position_if_large
+        )
         return relative_buckets
 
     def compute_bias(self, query_length, key_length, device=None):
@@ -91,22 +101,35 @@ class MultiheadAttention(nn.Module):
         """
         if device is None:
             device = self.relative_attn_bias.weight.device
-        context_position = torch.arange(query_length, dtype=torch.long, device=device)[:, None]
-        memory_position = torch.arange(key_length, dtype=torch.long, device=device)[None, :]
-        relative_position = memory_position - context_position  # shape (query_length, key_length)
+        context_position = torch.arange(query_length, dtype=torch.long, device=device)[
+            :, None
+        ]
+        memory_position = torch.arange(key_length, dtype=torch.long, device=device)[
+            None, :
+        ]
+        relative_position = (
+            memory_position - context_position
+        )  # shape (query_length, key_length)
         relative_position_bucket = self._relative_position_bucket(
             relative_position,  # shape (query_length, key_length)
             bidirectional=self.bidirectional,
             n_buckets=self.relative_attn_n_buckets,
             max_distance=self.relative_attn_max_distance,
         )
-        values = self.relative_attn_bias(relative_position_bucket)  # shape (query_length, key_length, num_heads)
+        values = self.relative_attn_bias(
+            relative_position_bucket
+        )  # shape (query_length, key_length, num_heads)
         values = einops.rearrange(
-            values, 'Q K (B nh) -> B nh Q K', B=1
+            values, "Q K (B nh) -> B nh Q K", B=1
         )  # shape (1, num_heads, query_length, key_length)
         return values
 
-    def forward(self, queries: Tensor, keys: Optional[Tensor] = None, values: Optional[Tensor] = None) -> Tensor:
+    def forward(
+        self,
+        queries: Tensor,
+        keys: Optional[Tensor] = None,
+        values: Optional[Tensor] = None,
+    ) -> Tensor:
         # batch size, sequence length, embedding dimensionality (d_model)
         # do self attention if only one input
         if keys is None:
@@ -122,7 +145,12 @@ class MultiheadAttention(nn.Module):
         v = self.v_proj(values)
 
         q, k, v = map(
-            lambda t: einops.rearrange(t, "B T (nh hs) -> B nh T hs", nh=self.n_head, hs=self.d_model // self.n_head),
+            lambda t: einops.rearrange(
+                t,
+                "B T (nh hs) -> B nh T hs",
+                nh=self.n_head,
+                hs=self.d_model // self.n_head,
+            ),
             (q, k, v),
         )  # (B, nh, T, hs)
 
@@ -135,7 +163,9 @@ class MultiheadAttention(nn.Module):
         att = F.softmax(att, dim=-1)
         att = self.attn_dropout(att)
         o = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        o = einops.rearrange(o, "B nh T hs -> B T (nh hs)")  # re-assemble all head outputs side by side
+        o = einops.rearrange(
+            o, "B nh T hs -> B T (nh hs)"
+        )  # re-assemble all head outputs side by side
 
         # output projection
         o = self.out_proj(o)
@@ -203,7 +233,7 @@ class EncoderBlock(nn.Module):
         )
         self.dropout_1 = nn.Dropout(resid_pdrop)
         self.ln_2 = RMSLayerNorm(d_model)
-        self.mlpf = SwiGLUMLP(d_model, mlpf_drop, bias=False)
+        self.mlpf = SwiGLUMLP(d_model, mlpf_pdrop, bias=False)
         self.dropout_2 = nn.Dropout(resid_pdrop)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -248,17 +278,19 @@ class DecoderBlock(nn.Module):
         )
         self.dropout_2 = nn.Dropout(resid_pdrop)
         self.ln_3 = RMSLayerNorm(d_model)
-        self.mlpf = SwiGLUMLP(d_model, mlpf_drop, bias=False)
+        self.mlpf = SwiGLUMLP(d_model, mlpf_pdrop, bias=False)
         self.dropout_3 = nn.Dropout(resid_pdrop)
 
     def forward(self, x: Tensor, hidden_states: Tensor) -> Tensor:
         x = x + self.dropout_1(self.self_attn(self.ln_1(x)))
-        x = x + self.dropout_2(self.cross_attn(self.ln_2(x), hidden_states, hidden_states))
+        x = x + self.dropout_2(
+            self.cross_attn(self.ln_2(x), hidden_states, hidden_states)
+        )
         x = x + self.dropout_3(self.mlpf(self.ln_3(x)))
         return x
 
 
-class T5(LightningModule):
+class T5(nn.Module):
     def __init__(
         self,
         n_encoder_layer: int,
@@ -266,7 +298,8 @@ class T5(LightningModule):
         n_head: int,
         d_model: int,
         vocab_size: int,
-        context_size: int,
+        encoder_context_size: int,
+        decoder_context_size: int,
         stack_pdrop: float = 0.1,
         mlpf_pdrop: float = 0.1,
         attn_pdrop: float = 0.1,
@@ -276,7 +309,8 @@ class T5(LightningModule):
     ) -> None:
         super().__init__()
         self.d_model = d_model
-        self.context_size = context_size
+        self.encoder_context_size = encoder_context_size
+        self.decoder_context_size = decoder_context_size
         self.shared_embedding = nn.Embedding(vocab_size, d_model)
 
         self.encoder = nn.ModuleDict(
@@ -288,7 +322,7 @@ class T5(LightningModule):
                         EncoderBlock(
                             d_model,
                             n_head,
-                            context_size,
+                            encoder_context_size,
                             mlpf_pdrop,
                             attn_pdrop,
                             resid_pdrop,
@@ -311,7 +345,7 @@ class T5(LightningModule):
                         DecoderBlock(
                             d_model,
                             n_head,
-                            context_size,
+                            decoder_context_size,
                             mlpf_pdrop,
                             attn_pdrop,
                             resid_pdrop,
@@ -327,11 +361,13 @@ class T5(LightningModule):
 
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
-    def forward(self, src_idx: Tensor, dst_idx: Tensor) -> Tensor:
-        st, dt = src_idx.size(1), dst_idx.size(1)
-        assert (
-            st <= self.context_size and dt <= self.context_size
-        ), f'Cannot forward sequence of length {st} or {dt}, context size is only {self.context_size}'
+    def forward(
+        self, src_idx: Tensor, dst_idx: Tensor, targets: Optional[Tensor]
+    ) -> Tensor:
+        # st, dt = src_idx.size(1), dst_idx.size(1)
+        # assert (
+        #     st <= self.context_size and dt <= self.context_size
+        # ), f"Cannot forward sequence of length {st} or {dt}, context size is only {self.context_size}"
 
         # forward through encoder stack
         src_emb = self.encoder.wte(src_idx)
@@ -350,29 +386,20 @@ class T5(LightningModule):
         # unembedding
         logits = self.lm_head(x)
 
-        return logits
+        if targets is not None:
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
+            )
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(
+                x[:, [-1], :]
+            )  # note: using list [-1] to preserve the time dim
+            loss = None
 
-    def training_step(self, batch: Tuple, batch_idx: int) -> STEP_OUTPUT:  # type: ignore
-        loss = self._shared_step(batch)
-        self.log('train_loss', loss)
-        return loss
+        return logits, loss
 
-    def validation_step(self, batch: Tuple, batch_idx: int) -> STEP_OUTPUT:  # type: ignore
-        loss = self._shared_step(batch)
-        self.log('val_loss', loss)
-        return loss
-
-    def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=3e-4)
-
-    def _shared_step(self, batch: Tuple) -> Tensor:
-        # Assume batch is tuple where [0] is encoder input, [1] is decoder input, [2] is targets
-
-        logits = self(batch[0], batch[1])
-
-        logits = einops.rearrange(logits, 'b s v -> (b s) v')
-        targets = einops.rearrange(batch[2], 'b s -> (b s)')
-
-        loss = F.cross_entropy(logits, targets, ignore_index=-1)
-
-        return loss
+    def configure_optimizers(self, learning_rate):
+        # TODO(adam): change to Adafactor to match paper
+        return torch.optim.AdamW(self.parameters(), lr=learning_rate)
