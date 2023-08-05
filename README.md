@@ -8,7 +8,42 @@ UL2 generalizes common pretraining objectives from a perspective of denoising an
 
 ![ul2-mod](https://github.com/adamcasson/nanoUL2/assets/6784558/3526de61-566b-484b-9c8c-fdcdce78be3d)
 
-# todos
+## install
+
+```
+pip install torch numpy einops transformers datasets h5py wandb tqdm
+```
+
+Dependencies:
+
+- [pytorch](https://pytorch.org)
+- [numpy](https://numpy.org/install/)
+-  `einops` for clean tensor manipulation
+-  `transformers` for tokenizers and optimizers
+-  `datasets` for huggingface datasets (if you want to download + preprocess TinyStories)
+-  `h5py` for efficient data loading
+-  `wandb` for optional logging
+-  `tqdm` for progress bars
+
+## quickstart
+
+If you are familiar with [nanoGPT](https://github.com/karpathy/nanoGPT) then the instructions and code should look mostly the same.
+
+To get started we can train a model on the [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) dataset. First, we need to download and preprocess the data by tokenizing, encoding into ints, and saving it:
+
+```
+$ python data/tinystories/prepare.py
+```
+
+The encoded data will be saved in `train.h5` and `validation.h5` in `data/tinystories/`. 
+
+`train.py` should look almost identical as well minus a few features at the moment (mainly DDP and AMP). Training on a single GPU can be kicked off by running:
+
+```
+$ python train.py
+```
+
+## todos
 - features
   - adafactor
   - match other settings to paper
@@ -16,6 +51,8 @@ UL2 generalizes common pretraining objectives from a perspective of denoising an
   - decoding for inference
   - cleaner model configuration
 - optimizations
+  - mixed precision
   - flash attention
   - sequence packing
   - data loading
+  - ddp
