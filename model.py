@@ -1,12 +1,10 @@
 import math
-from typing import Optional, Tuple
+from typing import Optional
 
 import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pytorch_lightning import LightningModule
-from pytorch_lightning.utilities.types import STEP_OUTPUT
 from torch import Tensor
 
 
