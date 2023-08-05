@@ -12,11 +12,9 @@ UL2 generalizes common pretraining objectives from a perspective of denoising an
 - features
   - adafactor
   - match other settings to paper
-  - model checkpointing/resume from checkpoint
-  - logging
+  - resume from checkpoint
   - decoding for inference
   - cleaner model configuration
-  - eval loop
 - optimizations
   - flash attention
   - sequence packing
