@@ -192,6 +192,8 @@ model_args = dict(
     vocab_size=tokenizer.vocab_size,
     encoder_context_size=encoder_block_size,
     decoder_context_size=decoder_block_size,
+    relative_attn_n_buckets=16,
+    relative_attn_max_distance=64,
 )
 model = T5(**model_args)
 model.cuda()

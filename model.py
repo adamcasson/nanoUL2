@@ -1,3 +1,6 @@
+"""
+This is based on T5 v1.1 but with SwiGLU instead of GEGLU as noted in UL2 paper
+"""
 import math
 from typing import Optional
 
@@ -9,45 +12,17 @@ from torch import Tensor
 from transformers.optimization import Adafactor
 
 
-class MultiheadAttention(nn.Module):
+class RelativePositionBias(nn.Module):
     def __init__(
-        self,
-        d_model: int,
-        n_head: int,
-        context_size: int,
-        bidirectional: bool = True,
-        attn_pdrop: float = 0.1,
-        relative_attn_n_buckets: int = 32,
-        relative_attn_max_distance: int = 128,
+        self, n_head: int, n_buckets: int, max_distance: int, bidirectional: bool
     ) -> None:
         super().__init__()
-        assert d_model % n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.q_proj = nn.Linear(d_model, d_model, bias=False)
-        self.k_proj = nn.Linear(d_model, d_model, bias=False)
-        self.v_proj = nn.Linear(d_model, d_model, bias=False)
-        # output projection
-        self.out_proj = nn.Linear(d_model, d_model, bias=False)
-        # regularization
-        self.attn_dropout = nn.Dropout(attn_pdrop)
-        # self.resid_dropout = nn.Dropout(resid_pdrop)
-        if not bidirectional:
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer(
-                "bias",
-                torch.tril(torch.ones(context_size, context_size)).view(
-                    1, 1, context_size, context_size
-                ),
-            )
-        self.bidirectional = bidirectional
         self.n_head = n_head
-        self.d_model = d_model
-        self.relative_attn_n_buckets = relative_attn_n_buckets
-        self.relative_attn_max_distance = relative_attn_max_distance
+        self.n_buckets = n_buckets
+        self.max_distance = max_distance
+        self.bidirectional = bidirectional
 
-        self.relative_attn_bias = nn.Embedding(
-            self.relative_attn_n_buckets, self.n_head
-        )
+        self.relative_bias = nn.Embedding(self.n_buckets, self.n_head)
 
     @staticmethod
     def _relative_position_bucket(
@@ -93,13 +68,13 @@ class MultiheadAttention(nn.Module):
         )
         return relative_buckets
 
-    def compute_bias(self, query_length, key_length, device=None):
+    def forward(self, query_length: int, key_length: int) -> Tensor:
         """Compute binned relative position bias
 
         code ref: https://github.com/huggingface/transformers/blob/v4.21.2/src/transformers/models/t5/modeling_t5.py#L421
         """
-        if device is None:
-            device = self.relative_attn_bias.weight.device
+
+        device = self.relative_bias.weight.device
         context_position = torch.arange(query_length, dtype=torch.long, device=device)[
             :, None
         ]
@@ -112,10 +87,10 @@ class MultiheadAttention(nn.Module):
         relative_position_bucket = self._relative_position_bucket(
             relative_position,  # shape (query_length, key_length)
             bidirectional=self.bidirectional,
-            n_buckets=self.relative_attn_n_buckets,
-            max_distance=self.relative_attn_max_distance,
+            n_buckets=self.n_buckets,
+            max_distance=self.max_distance,
         )
-        values = self.relative_attn_bias(
+        values = self.relative_bias(
             relative_position_bucket
         )  # shape (query_length, key_length, num_heads)
         values = einops.rearrange(
@@ -123,11 +98,46 @@ class MultiheadAttention(nn.Module):
         )  # shape (1, num_heads, query_length, key_length)
         return values
 
+
+class MultiheadAttention(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_head: int,
+        context_size: int,
+        bidirectional: bool = True,
+        attn_pdrop: float = 0.0,
+    ) -> None:
+        super().__init__()
+        assert d_model % n_head == 0
+        # key, query, value projections for all heads, but in a batch
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, d_model, bias=False)
+        self.v_proj = nn.Linear(d_model, d_model, bias=False)
+        # output projection
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+        # regularization
+        self.attn_pdrop = attn_pdrop
+        # self.attn_dropout = nn.Dropout(attn_pdrop)
+        # self.resid_dropout = nn.Dropout(resid_pdrop)
+        if not bidirectional:
+            # causal mask to ensure that attention is only applied to the left in the input sequence
+            self.register_buffer(
+                "bias",
+                torch.tril(torch.ones(context_size, context_size)).view(
+                    1, 1, context_size, context_size
+                ),
+            )
+        self.bidirectional = bidirectional
+        self.n_head = n_head
+        self.d_model = d_model
+
     def forward(
         self,
         queries: Tensor,
         keys: Optional[Tensor] = None,
         values: Optional[Tensor] = None,
+        position_bias: Optional[Tensor] = None,
     ) -> Tensor:
         # batch size, sequence length, embedding dimensionality (d_model)
         # do self attention if only one input
@@ -136,39 +146,35 @@ class MultiheadAttention(nn.Module):
         if values is None:
             values = queries
 
+        B = queries.size(0)
         qT = queries.size(1)
         kT = keys.size(1)
 
-        q = self.q_proj(queries)
-        k = self.k_proj(keys)
-        v = self.v_proj(values)
+        q = self.q_proj(queries).reshape(
+            B, qT, self.n_head, self.d_model // self.n_head
+        )
+        k = self.k_proj(keys).reshape(B, kT, self.n_head, self.d_model // self.n_head)
+        v = self.v_proj(values).reshape(B, kT, self.n_head, self.d_model // self.n_head)
 
-        q, k, v = map(
-            lambda t: einops.rearrange(
-                t,
-                "B T (nh hs) -> B nh T hs",
-                nh=self.n_head,
-                hs=self.d_model // self.n_head,
-            ),
-            (q, k, v),
-        )  # (B, nh, T, hs)
-
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        position_bias = self.compute_bias(qT, kT)
-        att += position_bias
         if not self.bidirectional:
-            att = att.masked_fill(self.bias[:, :, :qT, :kT] == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-        o = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        o = einops.rearrange(
-            o, "B nh T hs -> B T (nh hs)"
-        )  # re-assemble all head outputs side by side
+            if position_bias is not None:
+                position_bias = position_bias.masked_fill(
+                    self.bias[:, :, :qT, :kT] == 0, float("-inf")
+                )
+            else:
+                position_bias = self.bias.expand(q.size(0), q.size(1), qT, kT).bool()
+
+        x = (
+            F.scaled_dot_product_attention(
+                q, k, v, dropout_p=self.attn_pdrop, attn_mask=position_bias
+            )
+            .transpose(1, 2)
+            .reshape(q.size(0), qT, self.d_model)
+        )
 
         # output projection
-        o = self.out_proj(o)
-        return o
+        x = self.out_proj(x)
+        return x
 
 
 class RMSLayerNorm(nn.Module):
@@ -190,7 +196,7 @@ class SwiGLUMLP(nn.Module):
     def __init__(
         self,
         d_model: int,
-        mlpf_pdrop: float = 0.1,
+        mlpf_pdrop: float = 0.0,
         bias: bool = True,
     ) -> None:
         super().__init__()
@@ -212,14 +218,11 @@ class EncoderBlock(nn.Module):
         d_model: int,
         n_head: int,
         context_size: int,
-        mlpf_pdrop: float = 0.1,
-        attn_pdrop: float = 0.1,
-        resid_pdrop: float = 0.1,
-        relative_attn_n_buckets: int = 32,
-        relative_attn_max_distance: int = 128,
+        mlpf_pdrop: float = 0.0,
+        attn_pdrop: float = 0.0,
+        resid_pdrop: float = 0.0,
     ) -> None:
         super().__init__()
-
         self.ln_1 = RMSLayerNorm(d_model)
         self.attn = MultiheadAttention(
             d_model,
@@ -227,16 +230,14 @@ class EncoderBlock(nn.Module):
             context_size,
             bidirectional=True,
             attn_pdrop=attn_pdrop,
-            relative_attn_n_buckets=relative_attn_n_buckets,
-            relative_attn_max_distance=relative_attn_max_distance,
         )
         self.dropout_1 = nn.Dropout(resid_pdrop)
         self.ln_2 = RMSLayerNorm(d_model)
         self.mlpf = SwiGLUMLP(d_model, mlpf_pdrop, bias=False)
         self.dropout_2 = nn.Dropout(resid_pdrop)
 
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.dropout_1(self.attn(self.ln_1(x)))
+    def forward(self, x: Tensor, position_bias: Tensor) -> Tensor:
+        x = x + self.dropout_1(self.attn(self.ln_1(x), position_bias=position_bias))
         x = x + self.dropout_2(self.mlpf(self.ln_2(x)))
         return x
 
@@ -247,11 +248,9 @@ class DecoderBlock(nn.Module):
         d_model: int,
         n_head: int,
         context_size: int,
-        mlpf_pdrop: float = 0.1,
-        attn_pdrop: float = 0.1,
-        resid_pdrop: float = 0.1,
-        relative_attn_n_buckets: int = 32,
-        relative_attn_max_distance: int = 128,
+        mlpf_pdrop: float = 0.0,
+        attn_pdrop: float = 0.0,
+        resid_pdrop: float = 0.0,
     ) -> None:
         super().__init__()
         self.ln_1 = RMSLayerNorm(d_model)
@@ -261,8 +260,6 @@ class DecoderBlock(nn.Module):
             context_size,
             bidirectional=False,
             attn_pdrop=attn_pdrop,
-            relative_attn_n_buckets=relative_attn_n_buckets,
-            relative_attn_max_distance=relative_attn_max_distance,
         )
         self.dropout_1 = nn.Dropout(resid_pdrop)
         self.ln_2 = RMSLayerNorm(d_model)
@@ -272,16 +269,18 @@ class DecoderBlock(nn.Module):
             context_size,
             bidirectional=True,
             attn_pdrop=attn_pdrop,
-            relative_attn_n_buckets=relative_attn_n_buckets,
-            relative_attn_max_distance=relative_attn_max_distance,
         )
         self.dropout_2 = nn.Dropout(resid_pdrop)
         self.ln_3 = RMSLayerNorm(d_model)
         self.mlpf = SwiGLUMLP(d_model, mlpf_pdrop, bias=False)
         self.dropout_3 = nn.Dropout(resid_pdrop)
 
-    def forward(self, x: Tensor, hidden_states: Tensor) -> Tensor:
-        x = x + self.dropout_1(self.self_attn(self.ln_1(x)))
+    def forward(
+        self, x: Tensor, hidden_states: Tensor, position_bias: Tensor
+    ) -> Tensor:
+        x = x + self.dropout_1(
+            self.self_attn(self.ln_1(x), position_bias=position_bias)
+        )
         x = x + self.dropout_2(
             self.cross_attn(self.ln_2(x), hidden_states, hidden_states)
         )
@@ -299,10 +298,10 @@ class T5(nn.Module):
         vocab_size: int,
         encoder_context_size: int,
         decoder_context_size: int,
-        stack_pdrop: float = 0.1,
-        mlpf_pdrop: float = 0.1,
-        attn_pdrop: float = 0.1,
-        resid_pdrop: float = 0.1,
+        stack_pdrop: float = 0.0,
+        mlpf_pdrop: float = 0.0,
+        attn_pdrop: float = 0.0,
+        resid_pdrop: float = 0.0,
         relative_attn_n_buckets: int = 32,
         relative_attn_max_distance: int = 128,
     ) -> None:
@@ -316,6 +315,12 @@ class T5(nn.Module):
             {
                 "wte": self.shared_embedding,
                 "drop_in": nn.Dropout(stack_pdrop),
+                "rel_bias": RelativePositionBias(
+                    n_head,
+                    relative_attn_n_buckets,
+                    relative_attn_max_distance,
+                    bidirectional=True,
+                ),
                 "h": nn.ModuleList(
                     [
                         EncoderBlock(
@@ -325,8 +330,6 @@ class T5(nn.Module):
                             mlpf_pdrop,
                             attn_pdrop,
                             resid_pdrop,
-                            relative_attn_n_buckets,
-                            relative_attn_max_distance,
                         )
                         for _ in range(n_encoder_layer)
                     ]
@@ -339,6 +342,12 @@ class T5(nn.Module):
             {
                 "wte": self.shared_embedding,
                 "drop_in": nn.Dropout(stack_pdrop),
+                "rel_bias": RelativePositionBias(
+                    n_head,
+                    relative_attn_n_buckets,
+                    relative_attn_max_distance,
+                    bidirectional=False,
+                ),
                 "h": nn.ModuleList(
                     [
                         DecoderBlock(
@@ -348,8 +357,6 @@ class T5(nn.Module):
                             mlpf_pdrop,
                             attn_pdrop,
                             resid_pdrop,
-                            relative_attn_n_buckets,
-                            relative_attn_max_distance,
                         )
                         for _ in range(n_decoder_layer)
                     ]
@@ -374,15 +381,17 @@ class T5(nn.Module):
         # forward through encoder stack
         src_emb = self.encoder.wte(src_idx)
         x = self.encoder.drop_in(src_emb)
+        rel_bias = self.encoder.rel_bias(x.size(1), x.size(1))
         for block in self.encoder.h:
-            x = block(x)
+            x = block(x, rel_bias)
         hidden_states = self.encoder.drop_out(x)
 
         # forward through decoder stack
         dst_emb = self.decoder.wte(dst_idx)
         x = self.decoder.drop_in(dst_emb)
+        rel_bias = self.decoder.rel_bias(x.size(1), x.size(1))
         for block in self.decoder.h:
-            x = block(x, hidden_states)
+            x = block(x, hidden_states, rel_bias)
         x = self.decoder.drop_out(x)
 
         # unembedding

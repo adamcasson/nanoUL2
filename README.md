@@ -50,7 +50,6 @@ $ python train.py
   - cleaner model configuration
 - optimizations
   - mixed precision
-  - flash attention
   - sequence packing
   - data loading
   - ddp
