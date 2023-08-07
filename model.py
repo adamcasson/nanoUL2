@@ -361,7 +361,10 @@ class T5(nn.Module):
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
     def forward(
-        self, src_idx: Tensor, dst_idx: Tensor, targets: Optional[Tensor]
+        self,
+        src_idx: Tensor,
+        dst_idx: Tensor,
+        targets: Optional[Tensor] = None,
     ) -> Tensor:
         # st, dt = src_idx.size(1), dst_idx.size(1)
         # assert (
@@ -401,3 +404,36 @@ class T5(nn.Module):
 
     def configure_optimizers(self):
         return Adafactor(self.parameters())
+
+    @torch.no_grad()
+    def generate(
+        self, encoder_idx, decoder_idx, max_new_tokens, temperature=1.0, top_k=None
+    ):
+        for _ in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
+            encoder_idx_cond = (
+                encoder_idx
+                if encoder_idx.size(1) <= self.encoder_context_size
+                else encoder_idx[:, -self.encoder_context_size :]
+            )
+            decoder_idx_cond = (
+                decoder_idx
+                if decoder_idx.size(1) <= self.decoder_context_size
+                else decoder_idx[:, -self.decoder_context_size :]
+            )
+            # forward the model to get the logits for the index in the sequence
+            logits, _ = self(encoder_idx_cond, decoder_idx_cond)
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits[:, -1, :] / temperature
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("Inf")
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+            # append sampled index to the running sequence and continue
+            decoder_idx = torch.cat((decoder_idx, idx_next), dim=1)
+
+        return decoder_idx
