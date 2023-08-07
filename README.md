@@ -47,7 +47,6 @@ $ python train.py
 - features
   - match other settings to paper
   - resume from checkpoint
-  - decoding for inference
   - cleaner model configuration
 - optimizations
   - mixed precision
