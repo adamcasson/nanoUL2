@@ -15,16 +15,16 @@ from model import T5
 out_dir = "out"
 eval_interval = 10
 log_interval = 1
-eval_iters = 1
+eval_iters = 10
 eval_only = False  # if True, script exits right after the first eval
-always_save_checkpoint = True  # if True, always save a checkpoint after each eval
+always_save_checkpoint = False  # if True, always save a checkpoint after each eval
 # wandb logging
 wandb_log = True  # disabled by default
 wandb_project = "tinystories"
 wandb_run_name = "ul2"  # 'run' + str(time.time())
 # data
 gradient_accumulation_steps = 5 * 8
-batch_size = 16
+batch_size = 48
 # model
 encoder_block_size = 256
 decoder_block_size = 128
@@ -185,10 +185,10 @@ iter_num = 0
 best_val_loss = 1e9
 
 model_args = dict(
-    n_encoder_layer=2,
-    n_decoder_layer=2,
-    n_head=8,
-    d_model=512,
+    n_encoder_layer=8,
+    n_decoder_layer=8,
+    n_head=16,
+    d_model=256,
     vocab_size=tokenizer.vocab_size,
     encoder_context_size=encoder_block_size,
     decoder_context_size=decoder_block_size,

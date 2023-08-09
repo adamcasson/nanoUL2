@@ -4,7 +4,6 @@ This is based on T5 v1.1 but with SwiGLU instead of GEGLU as noted in UL2 paper
 import math
 from typing import Optional
 
-import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -93,8 +92,8 @@ class RelativePositionBias(nn.Module):
         values = self.relative_bias(
             relative_position_bucket
         )  # shape (query_length, key_length, num_heads)
-        values = einops.rearrange(
-            values, "Q K (B nh) -> B nh Q K", B=1
+        values = values.permute([2, 0, 1]).unsqueeze(
+            0
         )  # shape (1, num_heads, query_length, key_length)
         return values
 
@@ -150,11 +149,21 @@ class MultiheadAttention(nn.Module):
         qT = queries.size(1)
         kT = keys.size(1)
 
-        q = self.q_proj(queries).reshape(
-            B, qT, self.n_head, self.d_model // self.n_head
+        q = (
+            self.q_proj(queries)
+            .reshape(B, qT, self.n_head, self.d_model // self.n_head)
+            .permute(0, 2, 1, 3)
         )
-        k = self.k_proj(keys).reshape(B, kT, self.n_head, self.d_model // self.n_head)
-        v = self.v_proj(values).reshape(B, kT, self.n_head, self.d_model // self.n_head)
+        k = (
+            self.k_proj(keys)
+            .reshape(B, kT, self.n_head, self.d_model // self.n_head)
+            .permute(0, 2, 1, 3)
+        )
+        v = (
+            self.v_proj(values)
+            .reshape(B, kT, self.n_head, self.d_model // self.n_head)
+            .permute(0, 2, 1, 3)
+        )
 
         if not self.bidirectional:
             if position_bias is not None:

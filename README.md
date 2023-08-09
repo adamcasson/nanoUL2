@@ -11,14 +11,13 @@ UL2 generalizes common pretraining objectives from a perspective of denoising an
 ## install
 
 ```
-pip install torch numpy einops transformers datasets h5py wandb tqdm
+pip install torch numpy transformers datasets h5py wandb tqdm
 ```
 
 Dependencies:
 
 - [pytorch](https://pytorch.org)
 - [numpy](https://numpy.org/install/)
--  `einops` for clean tensor manipulation
 -  `transformers` for tokenizers and optimizers
 -  `datasets` for huggingface datasets (if you want to download + preprocess TinyStories)
 -  `h5py` for efficient data loading
