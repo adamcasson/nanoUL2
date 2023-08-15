@@ -1,4 +1,3 @@
-import math
 import os
 import random
 import time
@@ -44,15 +43,23 @@ config = {k: globals()[k] for k in config_keys}  # will be useful for logging
 tokenizer = AutoTokenizer.from_pretrained("ul2-tinystories-tokenizer")
 
 
-def mask_spans(tokens, mu, r, tokenizer, prefix_lm=False, prepend=None):
+def mask_spans(
+    tokens,
+    mu,
+    r,
+    vocab_size,
+    eos_id,
+    prepend_id=None,
+    prefix_lm=False,
+):
     # masked_tokens = tokens[:]
 
-    encoder_inputs = [tokenizer.vocab[prepend]] if prepend is not None else []
+    encoder_inputs = [prepend_id] if prepend_id is not None else []
     targets = []
 
     # Original T5 code reused tokens at the end of vocab for sentinels
     # https://github.com/google-research/text-to-text-transfer-transformer/blob/258fd30687e6c60d18b7204d009dc5c753142987/t5/data/preprocessors.py#L3106C6-L3106C6
-    sentinel_id = tokenizer.vocab_size - 1
+    sentinel_id = vocab_size - 1
 
     if prefix_lm:
         # n = 1
@@ -91,11 +98,12 @@ def mask_spans(tokens, mu, r, tokenizer, prefix_lm=False, prepend=None):
                     prev_span_unmasked = True
             start = end
 
-    targets.append(tokenizer.eos_token_id)
+    encoder_inputs.append(eos_id)
+    targets.append(eos_id)
     decoder_inputs = (
-        [tokenizer.vocab[prepend]] + targets[:-1]
-        if prepend is not None
-        else [tokenizer.eos_token_id] + targets[:-1]
+        [prepend_id] + targets[:-1]
+        if prepend_id is not None
+        else [eos_id] + targets[:-1]
     )
 
     return encoder_inputs, decoder_inputs, targets
@@ -103,21 +111,69 @@ def mask_spans(tokens, mu, r, tokenizer, prefix_lm=False, prepend=None):
 
 # Create mixture-of-denoisers
 r_denoisers = [
-    partial(mask_spans, mu=3, r=0.15, tokenizer=tokenizer, prepend="[R]"),
-    partial(mask_spans, mu=8, r=0.15, tokenizer=tokenizer, prepend="[R]"),
+    partial(
+        mask_spans,
+        mu=3,
+        r=0.15,
+        vocab_size=tokenizer.vocab_size,
+        eos_id=tokenizer.eos_token_id,
+        prepend_id=tokenizer.vocab["[R]"],
+    ),
+    partial(
+        mask_spans,
+        mu=8,
+        r=0.15,
+        vocab_size=tokenizer.vocab_size,
+        eos_id=tokenizer.eos_token_id,
+        prepend_id=tokenizer.vocab["[R]"],
+    ),
 ]
 
 s_denoisers = [
     partial(
-        mask_spans, mu=None, r=0.25, tokenizer=tokenizer, prefix_lm=True, prepend="[S]"
+        mask_spans,
+        mu=None,
+        r=0.25,
+        vocab_size=tokenizer.vocab_size,
+        eos_id=tokenizer.eos_token_id,
+        prefix_lm=True,
+        prepend_id=tokenizer.vocab["[S]"],
     ),
 ]
 
 x_denoisers = [
-    partial(mask_spans, mu=3, r=0.5, tokenizer=tokenizer, prepend="[X]"),
-    partial(mask_spans, mu=8, r=0.5, tokenizer=tokenizer, prepend="[X]"),
-    partial(mask_spans, mu=32, r=0.15, tokenizer=tokenizer, prepend="[X]"),
-    partial(mask_spans, mu=32, r=0.5, tokenizer=tokenizer, prepend="[X]"),
+    partial(
+        mask_spans,
+        mu=3,
+        r=0.5,
+        vocab_size=tokenizer.vocab_size,
+        eos_id=tokenizer.eos_token_id,
+        prepend_id=tokenizer.vocab["[X]"],
+    ),
+    partial(
+        mask_spans,
+        mu=8,
+        r=0.5,
+        vocab_size=tokenizer.vocab_size,
+        eos_id=tokenizer.eos_token_id,
+        prepend_id=tokenizer.vocab["[X]"],
+    ),
+    partial(
+        mask_spans,
+        mu=32,
+        r=0.15,
+        vocab_size=tokenizer.vocab_size,
+        eos_id=tokenizer.eos_token_id,
+        prepend_id=tokenizer.vocab["[X]"],
+    ),
+    partial(
+        mask_spans,
+        mu=32,
+        r=0.5,
+        vocab_size=tokenizer.vocab_size,
+        eos_id=tokenizer.eos_token_id,
+        prepend_id=tokenizer.vocab["[X]"],
+    ),
 ]
 
 denoisers = r_denoisers + s_denoisers + x_denoisers
@@ -162,7 +218,6 @@ def get_batch(split):
     d_lengths = []
 
     for i, s in enumerate(seq):
-        # print(ix, i)
         e, d, t = rand_denoiser(s.tolist())
 
         e_lengths.append(min(encoder_block_size, len(e)))
