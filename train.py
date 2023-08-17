@@ -18,7 +18,7 @@ eval_iters = 10
 eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = False  # if True, always save a checkpoint after each eval
 # wandb logging
-wandb_log = True  # disabled by default
+wandb_log = False  # disabled by default (https://twitter.com/agihippo/status/1690198832448229376)
 wandb_project = "tinystories"
 wandb_run_name = "ul2"  # 'run' + str(time.time())
 # data
