@@ -52,8 +52,6 @@ def mask_spans(
     prepend_id=None,
     prefix_lm=False,
 ):
-    # masked_tokens = tokens[:]
-
     encoder_inputs = [prepend_id] if prepend_id is not None else []
     targets = []
 
@@ -62,24 +60,25 @@ def mask_spans(
     sentinel_id = vocab_size - 1
 
     if prefix_lm:
-        # n = 1
         mu = max(1, int(len(tokens) * r))
+        # sample from uniform distribution for S denoisers
         start = max(
             0, len(tokens) - random.randint(1, int(2 * mu))
         )  # max to handle start < 0
         encoder_inputs += tokens[:start] + [sentinel_id]
-        targets += tokens[start:]
-        # for i in range(start, len(tokens)):
-        #     masked_tokens[i] = 0
+        targets += [sentinel_id] + tokens[start:]
 
     else:
-        # n = ceil(len(tokens) / mu)
         prev_span_unmasked = False
         start = 0
         end = 0
         while start < len(tokens):
-            # uniform random span length
-            length = random.randint(1, int(2 * mu))
+            # for R and X denoisers, sample random span length from normal distribution bounded from 1 to 2 * mu.
+            # std of 0.25 * mu is arbitrary, not specified in paper but makes a sane looking distribution
+            #  at extreme ends of span length means (from 3 to 64).
+            length = max(
+                1, min(int(2 * mu), int(np.round(np.random.normal(mu, 0.25 * mu))))
+            )
             end = min(start + length, len(tokens))
 
             # randomly decide if span should be masked
@@ -98,13 +97,8 @@ def mask_spans(
                     prev_span_unmasked = True
             start = end
 
-    encoder_inputs.append(eos_id)
     targets.append(eos_id)
-    decoder_inputs = (
-        [prepend_id] + targets[:-1]
-        if prepend_id is not None
-        else [eos_id] + targets[:-1]
-    )
+    decoder_inputs = [eos_id] + targets[:-1]
 
     return encoder_inputs, decoder_inputs, targets
 
