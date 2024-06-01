@@ -33,8 +33,6 @@ from denoising import (
     denoise,
     noise_span_to_unique_sentinel,
     nonnoise_span_to_unique_sentinel,
-    noise_span_to_fixed_sentinel,
-    nonnoise_span_to_fixed_sentinel,
     random_prefix_noise_mask,
     random_spans_helper,
     random_spans_noise_mask,
