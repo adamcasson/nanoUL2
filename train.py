@@ -39,7 +39,7 @@ from denoising import (
     random_spans_helper,
     random_spans_noise_mask,
 )
-from model2 import TransformerConfig, Transformer
+from model import TransformerConfig, Transformer
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a transformer (124M) on OpenWebText
