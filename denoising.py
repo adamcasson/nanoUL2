@@ -146,13 +146,11 @@ def random_spans_helper(
             num_noise_tokens +
             num_noise_spans * extra_tokens_per_span_targets)
 
-    # tokens_length = inputs_length - 1
+    tokens_length = inputs_length
     if decoder_only:
-        tokens_length = inputs_length
         while(sum(_tokens_length_to_inputs_length_targets_length(tokens_length)) > inputs_length):
             tokens_length -= 1
     else:
-        tokens = inputs_length
         while (_tokens_length_to_inputs_length_targets_length(tokens_length)[0] <= inputs_length):
             tokens_length += 1
 
