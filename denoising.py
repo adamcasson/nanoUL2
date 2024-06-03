@@ -140,19 +140,20 @@ def random_spans_helper(
         num_nonnoise_tokens = tokens_length - num_noise_tokens
         num_noise_spans = int(round(num_noise_tokens / mean_noise_span_length))
         # inputs contain all nonnoise tokens, sentinels for all noise spans
-        # and one EOS token.
         return (
             num_nonnoise_tokens +
-            num_noise_spans * extra_tokens_per_span_inputs + 1,
+            num_noise_spans * extra_tokens_per_span_inputs,
             num_noise_tokens +
-            num_noise_spans * extra_tokens_per_span_targets + 1)
+            num_noise_spans * extra_tokens_per_span_targets)
 
-    tokens_length = inputs_length - 1
+    # tokens_length = inputs_length - 1
     if decoder_only:
-        while(sum(_tokens_length_to_inputs_length_targets_length(tokens_length + 1)) > inputs_length):
+        tokens_length = inputs_length
+        while(sum(_tokens_length_to_inputs_length_targets_length(tokens_length)) > inputs_length):
             tokens_length -= 1
     else:
-        while (_tokens_length_to_inputs_length_targets_length(tokens_length + 1)[0] <= inputs_length):
+        tokens = inputs_length
+        while (_tokens_length_to_inputs_length_targets_length(tokens_length)[0] <= inputs_length):
             tokens_length += 1
 
     inputs_length, targets_length = _tokens_length_to_inputs_length_targets_length(tokens_length)

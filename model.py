@@ -236,13 +236,11 @@ class Transformer(nn.Module):
             x = blk(x, position_ids)
 
         x = self.norm(x)
-        logits = self.lm_head(x)
 
-        
         if targets is not None:
             logits = self.lm_head(x)
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
+                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100
             )
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position

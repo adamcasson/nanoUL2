@@ -179,7 +179,7 @@ def get_batch(split):
                 # helper that tells us to denoise a sequence of size N with the chosen hparams
                 # to ensure it fits as closely as possible to our context size to minimize padding
                 random_chunk_size, _ = random_spans_helper(
-                    context_size - len(task_prefix_tokens),
+                    context_size - len(task_prefix_tokens) + 1,
                     noise_density,
                     noise_span_length,
                     extra_tokens_per_span_inputs=1,
@@ -188,7 +188,7 @@ def get_batch(split):
                 )
             else:
                 # for S-denoisers
-                random_chunk_size = context_size - len(task_prefix_tokens)
+                random_chunk_size = context_size - len(task_prefix_tokens) + 1
             
             # select a random chunk of tokens from the dataset
             ix = torch.randint(len(data) - random_chunk_size, (1,))
@@ -220,11 +220,11 @@ def get_batch(split):
                 x[i, :len(task_prefix_tokens)] = task_prefix_tokens
 
             x[i, input_start:input_end] = inputs
-            x[i, input_end:input_end+len(targets)] = targets
+            x[i, input_end:input_end+len(targets)-1] = targets[:-1]
             # we don't want to learn to generate sentinel tokens, so we mask them from the targets
             # not sure if this is actually done in the paper, but it makes sense and got better results
             targets = torch.where(targets > gpt2_base_enc.max_token_value, -100, targets)
-            y[i, input_end:input_end+len(targets)-1] = targets[1:]  # shift targets right
+            y[i, input_end:input_end+len(targets)-1] = targets[1:]  # shift left
     else:
         # for val (or causal_only=True) we can do full CasualLM objective
         ix = torch.randint(len(data) - context_size, (batch_size,))
