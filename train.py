@@ -221,10 +221,7 @@ def get_batch(split):
 
             x[i, input_start:input_end] = inputs
             x[i, input_end:input_end+len(targets)-1] = targets[:-1]
-            # we don't want to learn to generate sentinel tokens, so we mask them from the targets
-            # not sure if this is actually done in the paper, but it makes sense and got better results
-            targets = torch.where(targets > gpt2_base_enc.max_token_value, -100, targets)
-            y[i, input_end:input_end+len(targets)-1] = targets[1:]  # shift left
+            y[i, input_end:input_end+len(targets)-1] = targets[1:]
     else:
         # for val (or causal_only=True) we can do full CasualLM objective
         ix = torch.randint(len(data) - context_size, (batch_size,))
