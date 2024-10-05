@@ -21,12 +21,23 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+from functools import partial
 
 import numpy as np
+import tiktoken
 import torch
+from torch.nn.attention.flex_attention import create_block_mask, or_masks
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+from denoising import (
+    denoise,
+    noise_span_to_unique_sentinel,
+    nonnoise_span_to_unique_sentinel,
+    random_prefix_noise_mask,
+    random_spans_helper,
+    random_spans_noise_mask,
+)
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
@@ -48,6 +59,12 @@ dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
+# UL2 hyperparams
+causal_only = False # if True, falls back to regular fully causal langauge modeling
+mean_noise_span_lengths = [3.0, 8.0, 3.0, 8.0, 64.0, 64.0, None] # mean length of corrupted spans, use None for S-denoisers
+noise_densities = [0.15, 0.15, 0.5, 0.5, 0.15, 0.5, 0.25] # rate of corruption
+optional_task_prefixes = ["[NLU]", "[NLU]", "[NLG]", "[NLG]", "[NLG]", "[NLG]", "[S2S]"] # mode token prepended to input
+rates = [0.13, 0.13, 0.13, 0.13, 0.13, 0.13, 0.22] # probability of picking each denoiser, the paper says ~20% for S-denoisers
 # model
 n_layer = 12
 n_head = 12
@@ -77,6 +94,40 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
+
+assert len(mean_noise_span_lengths) == len(noise_densities) == len(optional_task_prefixes) == len(rates)
+assert set(optional_task_prefixes).issubset({"[NLU]", "[S2S]", "[NLG]", None})
+noise_hparams = [(mu, r, pre) for mu, r, pre in zip(mean_noise_span_lengths, noise_densities, optional_task_prefixes)]
+
+# we need the tokenizer for tokenizing any mode prefix tokens
+gpt2_base_enc = tiktoken.get_encoding("gpt2")
+
+# map mode tokens start at the end of GPT-2 vocab
+mode_tokens = {
+        "[NLU]": gpt2_base_enc.max_token_value + 1,
+        "[S2S]": gpt2_base_enc.max_token_value + 2,
+        "[NLG]": gpt2_base_enc.max_token_value + 3,
+}
+
+# map sentinel tokens starting at the end of the vocab, i.e.
+# {
+#     "<|sentinel_token_0|>": 50431,
+#     "<|sentinel_token_1|>": 50430,
+#     etc.
+# }
+sentinel_tokens = {f"<|sentinel_token_{i}|>": vidx for i, vidx in enumerate(range(50432-1, gpt2_base_enc.max_token_value + 3, -1))}
+
+# extend gpt2 tokenizer with the sentinel tokens
+enc = tiktoken.Encoding(
+    name="gpt2_ul2",
+    pat_str=gpt2_base_enc._pat_str,
+    mergeable_ranks=gpt2_base_enc._mergeable_ranks,
+    special_tokens={
+        **gpt2_base_enc._special_tokens,
+        **mode_tokens,
+        **sentinel_tokens,
+    }
+)
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -120,16 +171,101 @@ def get_batch(split):
         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     else:
         data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
-    if device_type == 'cuda':
+   
+    if split == 'train' and not causal_only:
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        # set y array to -1 to ignore xentropy loss at that position
+        x = torch.zeros(batch_size, block_size, dtype=torch.int64, pin_memory=True)
+        y = torch.zeros(batch_size, block_size, dtype=torch.int64, pin_memory=True) - 1
+        position_ids = torch.arange(0, block_size, dtype=torch.int64, pin_memory=True).repeat(batch_size, 1)
+        # position_ids = torch.zeros(batch_size, block_size, dtype=torch.int64, pin_memory=True)
+        prefix_lens = []
+
+        for i in range(batch_size):
+            # select a random set of denoiser params according the probability in `rates`
+            noise_span_length, noise_density, task_prefix = noise_hparams[np.random.choice(len(noise_hparams), p=rates)]
+            task_prefix_tokens = [] if task_prefix is None else torch.tensor(enc.encode(task_prefix, allowed_special="all"), dtype=torch.int64)
+            
+            # if the denoiser isn't an S-denoiser (PrefixLM)
+            if noise_span_length is not None:
+                # helper that tells us to denoise a sequence of size N with the chosen hparams
+                # to ensure it fits as closely as possible to our context size to minimize padding
+                random_chunk_size, _ = random_spans_helper(
+                    block_size - len(task_prefix_tokens) + 1,
+                    noise_density,
+                    noise_span_length,
+                    extra_tokens_per_span_inputs=1,
+                    extra_tokens_per_span_targets=1,
+                    decoder_only=True,
+                )
+            else:
+                # for S-denoisers
+                random_chunk_size = block_size - len(task_prefix_tokens) + 1
+            
+            # select a random chunk of tokens from the dataset
+            ix = torch.randint(len(data) - random_chunk_size, (1,))
+            random_chunk = torch.from_numpy((data[ix:ix+random_chunk_size]).astype(np.int64))
+
+            noise_mask_fn = partial(
+                random_spans_noise_mask,
+                noise_density=noise_density,
+                mean_noise_span_length=noise_span_length
+            ) if noise_span_length is not None else partial(random_prefix_noise_mask, noise_density=noise_density)
+           
+            # corrupt the sequence and make the inputs/targets (will be concat together for decoder-only model)
+            noise_mask = noise_mask_fn(len(random_chunk))
+            inputs, targets = denoise(
+                random_chunk,
+                noise_mask,
+                inputs_fn=partial(noise_span_to_unique_sentinel, vocab_size=enc.n_vocab),
+                targets_fn=partial(nonnoise_span_to_unique_sentinel, vocab_size=enc.n_vocab),
+            )
+
+            # for PrefixLM task, strip the sentinel tokens for decoder-only setting
+            if noise_span_length is None:
+                inputs = inputs[:-1]
+                targets = targets[1:]
+           
+            input_start, input_end = len(task_prefix_tokens), len(task_prefix_tokens) + len(inputs)
+
+            if task_prefix is not None:
+                x[i, :len(task_prefix_tokens)] = task_prefix_tokens
+
+            x[i, input_start:input_end] = inputs
+            x[i, input_end:input_end+len(targets)-1] = targets[:-1]
+            y[i, input_end:input_end+len(targets)-1] = targets[1:]
+
+            prefix_lens.append(input_end)
+    else:
+        # for val (or causal_only=True) we can do full CasualLM objective
+        ix = torch.randint(len(data) - block_size, (batch_size,))
+        x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix]).pin_memory()
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix]).pin_memory()
+        prefix_lens = None
+    
+    if device_type == 'cuda':
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    return x, y
+    
+    prefix_lens = torch.tensor(prefix_lens, dtype=torch.int32).to(device) if prefix_lens is not None else None
+    
+    def _get_attn_mask_fn(prefix_lens=None):
+        def causal_mask(b, h, q_idx, kv_idx):
+            return q_idx >= kv_idx
 
+        def prefix_mask(b, h, q_idx, kv_idx):
+            return kv_idx < prefix_lens[b]
+
+        if prefix_lens is None:
+            return causal_mask
+        else:
+            return or_masks(prefix_mask, causal_mask)
+    
+    B, S = x.shape
+    attn_mask = create_block_mask(_get_attn_mask_fn(prefix_lens), B, None, S, S, device=x.device)
+    
+    return x, y, attn_mask
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
 best_val_loss = 1e9
@@ -151,8 +287,8 @@ if init_from == 'scratch':
     print("Initializing a new model from scratch")
     # determine the vocab size we'll use for from-scratch training
     if meta_vocab_size is None:
-        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+        print("defaulting to vocab_size of GPT-2 to 50304 (50432 rounded up for efficiency and special tokens)")
+    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50432
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
 elif init_from == 'resume':
@@ -219,9 +355,9 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y, attn_mask = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, loss = model(X, attn_mask, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -247,7 +383,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y, attn_mask = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -297,10 +433,10 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss = model(X, attn_mask, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, Y, attn_mask = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
